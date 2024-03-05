@@ -67,8 +67,9 @@ X_combined = torch.cat((X_text, torch.FloatTensor(image_metadata)), dim=1)
 adjacency_matrix = np.dot(X_combined, X_combined.T)
 adjacency_matrix = torch.FloatTensor(adjacency_matrix)
 
-# Split data into train and test sets
-X_train, X_test, y_train, y_test = train_test_split(X_combined, y, test_size=0.2, random_state=42)
+# Split data into train, validation, and test sets
+X_train_val, X_test, y_train_val, y_test = train_test_split(X_combined, y, test_size=0.2, random_state=42)
+X_train, X_val, y_train, y_val = train_test_split(X_train_val, y_train_val, test_size=0.2, random_state=42)
 
 # Define the number of most significant connections per node
 k = 10
@@ -100,36 +101,32 @@ else:
     edge_index[edge_index[:, 0] == edge_index[:, 1], 1] = edge_index.size(1)
     edge_index = edge_index[edge_index[:, 1] > edge_index[:, 0], :]
 
+# Define the Graph Convolutional Network (GCN) model
 class GCNModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim):
         super(GCNModel, self).__init__()
         self.conv1 = GCNConv(input_dim, hidden_dim)
-        self.bn1 = nn.BatchNorm1d(hidden_dim)
         self.conv2 = GCNConv(hidden_dim, hidden_dim)
-        self.bn2 = nn.BatchNorm1d(hidden_dim)
-        self.conv3 = GCNConv(hidden_dim, hidden_dim)
-        self.bn3 = nn.BatchNorm1d(hidden_dim)
-        self.conv4 = GCNConv(hidden_dim, output_dim)
+        self.conv3 = GCNConv(hidden_dim, output_dim)
 
     def forward(self, x, edge_index):
         x = self.conv1(x, edge_index)
-        x = self.bn1(x)
         x = F.relu(x)
-        x = F.dropout(x, p=0.5, training=self.training)
+        x = F.dropout(x, training=self.training)
         x = self.conv2(x, edge_index)
-        x = self.bn2(x)
         x = F.relu(x)
-        x = F.dropout(x, p=0.5, training=self.training)
+        x = F.dropout(x, training=self.training)
         x = self.conv3(x, edge_index)
-        x = self.bn3(x)
-        x = F.relu(x)
-        x = F.dropout(x, p=0.5, training=self.training)
-        x = self.conv4(x, edge_index)
         return F.log_softmax(x, dim=1)
+
+# Define hyperparameters to tune
+learning_rates = [0.001, 0.01, 0.1]
+hidden_dims = [32, 64, 128]
+dropout_rates = [0.1, 0.5]
 
 # Instantiate the model
 input_dim = X_combined.shape[1]
-hidden_dim = 128
+hidden_dim = 64
 output_dim = 2  # Two classes: Real and Fake
 model = GCNModel(input_dim, hidden_dim, output_dim)
 
@@ -137,53 +134,42 @@ model = GCNModel(input_dim, hidden_dim, output_dim)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)  # Adjust learning rate
 
-# Train-validation-test split
-X_train_val, X_test, y_train_val, y_test = train_test_split(X_combined, y, test_size=0.2, random_state=42)
-X_train, X_val, y_train, y_val = train_test_split(X_train_val, y_train_val, test_size=0.2, random_state=42)
+best_accuracy = 0
+best_hyperparams = {}
 
-# Convert X_train, X_val, and X_test to PyTorch tensors
-X_train = torch.FloatTensor(X_train)
-y_train = torch.LongTensor(y_train)
-X_val = torch.FloatTensor(X_val)
-y_val = torch.LongTensor(y_val)
-X_test = torch.FloatTensor(X_test)
-y_test = torch.LongTensor(y_test)
-
-# Wrap the data in PyTorch Geometric Data objects
+# Create Data objects for train, validation, and test sets
 train_data = Data(x=X_train, edge_index=edge_index, y=y_train)
 val_data = Data(x=X_val, edge_index=edge_index, y=y_val)
 test_data = Data(x=X_test, edge_index=edge_index, y=y_test)
 
-# Define the size of the train and validation masks
-num_nodes_train = X_train.size(0)
-num_nodes_val = X_val.size(0)
-
-# Create the train and validation masks
-train_mask = torch.zeros(num_nodes_train, dtype=torch.bool)
-val_mask = torch.zeros(num_nodes_val, dtype=torch.bool)
-train_mask[:num_nodes_train // 2] = True  # Assuming first half of nodes are in the training set
-val_mask[:num_nodes_val // 2] = True  # Assuming first half of nodes are in the validation set
-
-# Assign the train and validation masks to train and validation data
-train_data.train_mask = train_mask
-val_data.val_mask = val_mask
-
-# Move the model and data to the appropriate device
+# Train the model
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model.to(device)
 train_data.to(device)
-val_data.to(device)
-test_data.to(device)
 
-# Define the training loop
-def train(model, train_data, criterion, optimizer, device):
+# Move data to device
+train_data = train_data.to(device)
+val_data = val_data.to(device)
+test_data = test_data.to(device)
+
+# Adjust training loop
+def train(model, train_data, criterion, optimizer):
     model.train()
     optimizer.zero_grad()
     out = model(train_data.x, train_data.edge_index)
-    loss = criterion(out[train_data.train_mask], train_data.y[train_data.train_mask])
+    loss = criterion(out[train_data.y], train_data.y)  # Use train_data.y directly
     loss.backward()
     optimizer.step()
     return loss.item()
+
+# Adjust evaluation function
+def evaluate(model, data, criterion):
+    model.eval()
+    with torch.no_grad():
+        out = model(data.x, data.edge_index)
+        loss = criterion(out, data.y)  # Compute loss using all data
+        acc = accuracy(out, data.y)  # Compute accuracy using all data
+    return loss, acc
 
 # Define the accuracy function
 def accuracy(pred, y):
@@ -192,28 +178,74 @@ def accuracy(pred, y):
     total = y.size(0)
     return correct / total
 
-# Define the evaluation function for the test set
-def test(model, test_data, criterion):
-    model.eval()
-    with torch.no_grad():
-        out = model(test_data.x, test_data.edge_index)
-        loss = criterion(out[test_data.y], test_data.y)
-        acc = accuracy(out[test_data.y], test_data.y)
-    return loss.item(), acc
+# Train final model with best hyperparameters on combined training and validation set
+# Train final model with best hyperparameters on combined training and validation set
+if best_hyperparams:
+    final_model = GCNModel(input_dim, best_hyperparams['hidden_dim'], output_dim)
+    optimizer = optim.Adam(final_model.parameters(), lr=best_hyperparams['learning_rate'])
+    criterion = nn.CrossEntropyLoss()
 
-# Train the model
-best_val_loss = float('inf')
-best_model = None
-for epoch in range(100):
-    train_loss = train(model, train_data, criterion, optimizer, device)
-    val_loss, val_acc = test(model, val_data, criterion)
-    print(f'Epoch: {epoch+1}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Accuracy: {val_acc:.4f}')
+    # Move final model and data to device
+    final_model.to(device)
 
-    # Check if the current validation loss is the best
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        best_model = model
+    # Train the model
+    for epoch in range(100):
+        final_model.train()  # Set model to train mode
+        optimizer.zero_grad()  # Clear gradients
+        out = final_model(train_data.x, train_data.edge_index)  # Forward pass
+        loss = criterion(out[train_data.y], train_data.y)  # Compute loss using all data
+        loss.backward()  # Backward pass
+        optimizer.step()  # Update weights
 
-# Evaluate the best model on the test set
-test_loss, test_acc = test(best_model, test_data, criterion)
-print(f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}')
+        # Validate the model
+        final_model.eval()  # Set model to evaluation mode
+        with torch.no_grad():
+            out = final_model(val_data.x, val_data.edge_index)
+            val_loss = criterion(out, val_data.y)
+            val_acc = accuracy(out, val_data.y)
+        print(f'Epoch: {epoch+1}, Train Loss: {loss:.4f}, Val Loss: {val_loss:.4f}, Val Accuracy: {val_acc:.4f}')
+
+    # Evaluate on test set
+    test_loss, test_acc = evaluate(final_model, test_data, criterion)
+    print(f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}')
+    
+    # Evaluate on test set
+    test_loss, test_acc = evaluate(final_model, test_data, criterion)
+    print(f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_acc:.4f}')
+else:
+    print("No best hyperparameters found.")
+
+# # Define the evaluation function
+# def evaluate(model, data, criterion):
+#     model.eval()
+#     with torch.no_grad():
+#         out = model(data.x, data.edge_index)
+#         loss = criterion(out[data.test_mask], data.y[data.test_mask])
+#         acc = accuracy(out[data.test_mask], data.y[data.test_mask])
+#     return loss, acc
+
+# Perform grid search
+for lr in learning_rates:
+    for hd in hidden_dims:
+        for dropout in dropout_rates:
+            # Instantiate model with current hyperparameters
+            model = GCNModel(input_dim, hd, output_dim)
+            optimizer = optim.Adam(model.parameters(), lr=lr)
+            criterion = nn.CrossEntropyLoss()
+
+            # Train model
+            for epoch in range(100):
+                train_loss = train(model, train_data, criterion, optimizer)
+
+            # Evaluate on validation set
+            val_loss, val_accuracy = evaluate(model, val_data, criterion)
+            
+            # Check if current hyperparameters yield better accuracy
+            if val_accuracy > best_accuracy:
+                best_accuracy = val_accuracy
+                best_hyperparams = {'learning_rate': lr, 'hidden_dim': hd, 'dropout': dropout}
+
+# # Evaluate on test set
+# test_loss, test_accuracy = evaluate(final_model, X_test, y_test, criterion)
+# print(f'Best Hyperparameters: {best_hyperparams}')
+# print(f'Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.4f}')
