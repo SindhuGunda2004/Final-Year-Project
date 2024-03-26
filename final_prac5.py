@@ -28,6 +28,7 @@ from torch_geometric.utils.convert import to_networkx
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix
 import seaborn as sns
+from sklearn.utils.class_weight import compute_class_weight
 
 # Function to extract image metadata
 def extract_image_metadata(url):
@@ -72,13 +73,13 @@ def extract_image_metadata(url):
     return None
 
 # Read the training dataset
-train_df = pd.read_csv("/Users/sindhugunda/Documents/Information Technology/Year 3/CST3990/Final-Year-Project/traindata.csv")
+train_df = pd.read_csv("/Users/sindhugunda/Documents/Information Technology/Year 3/CST3990/Final-Year-Project/multimodal_test_public.csv")
 
 # Read the testing dataset
-test_df = pd.read_csv("/Users/sindhugunda/Documents/Information Technology/Year 3/CST3990/Final-Year-Project/multimodal_test_public.csv")
+test_df = pd.read_csv("/Users/sindhugunda/Documents/Information Technology/Year 3/CST3990/Final-Year-Project/traindata.csv")
 
 # Set the desired size for your subset
-subset_size = 100
+subset_size = 50
 
 # Randomly sample data points from the DataFrame
 train_df = train_df.sample(n=subset_size, random_state=42)
@@ -201,12 +202,13 @@ source_nodes = [edge[0] for edge in edge_list]
 target_nodes = [edge[1] for edge in edge_list]
 
 
-# Define the GCN model
+# Define the GCN model with an additional hidden layer
 class SimpleGCNModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, dropout):
+    def __init__(self, input_dim, hidden_dim1, hidden_dim2, output_dim, dropout):
         super(SimpleGCNModel, self).__init__()
-        self.conv1 = GCNConv(input_dim, hidden_dim)
-        self.conv2 = GCNConv(hidden_dim, output_dim)
+        self.conv1 = GCNConv(input_dim, hidden_dim1)
+        self.conv2 = GCNConv(hidden_dim1, hidden_dim2)
+        self.conv3 = GCNConv(hidden_dim2, output_dim)
         self.dropout = dropout
 
     def forward(self, x, edge_index):
@@ -214,18 +216,26 @@ class SimpleGCNModel(nn.Module):
         x = F.relu(x)
         x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.conv2(x, edge_index)
+        x = F.relu(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.conv3(x, edge_index)
         return F.log_softmax(x, dim=1)
-    
-# Instantiate the model
-input_dim = X_combined_train.shape[1]  # Use X_combined_train.shape[1] for the input dimension
-hidden_dim = 64
-output_dim = 2
-dropout = 0.5
-model = SimpleGCNModel(input_dim, hidden_dim, output_dim, dropout)
 
-# Define loss function and optimizer
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.0001)
+# Instantiate the model with two hidden layers
+input_dim = X_combined_train.shape[1]  # Use X_combined_train.shape[1] for the input dimension
+hidden_dim1 = 128
+hidden_dim2 = 64  # New hidden layer dimension
+output_dim = 2
+dropout = 0.6
+model = SimpleGCNModel(input_dim, hidden_dim1, hidden_dim2, output_dim, dropout)
+
+# Calculate class weights
+class_weights = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
+class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(device)
+
+# Use in your loss function
+criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
+optimizer = optim.Adam(model.parameters(), lr=0.3)
 
 # Determine the total number of nodes in the graph
 num_nodes = edge_index.max().item() + 1
