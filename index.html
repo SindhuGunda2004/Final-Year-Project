@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="./style.css" type="text/css">
+    <title>FactFlare</title>
+</head>
+
+<body>
+    <div class="header">
+        FactFlare
+    </div>
+    <div class="container">
+        <input class="text" type="text" name="text" id="text-input" placeholder="Input the text you want to verify" />
+        <input class="image" type="url" name="image" id="image-input" placeholder="Input the image url" />
+        <button id="verify-button" onclick="performVerification()">Verify</button>
+        <div id="prediction-result"></div>
+    </div>
+
+    <script>
+        function performVerification() {
+            var text = document.getElementById("text-input").value;
+            var image = document.getElementById("image-input").value;
+
+            // Make a POST request to your Flask server
+            fetch('http://localhost:3000/predict', {
+                method: 'POST',  // Send a POST request
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ text: text, image: image })
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Network response was not ok');
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    console.log('Prediction:', data.prediction);
+                    document.getElementById('prediction-result').textContent = 'Prediction: ' + data.prediction;
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                });
+        }
+
+    </script>
+</body>
+
+</html>
